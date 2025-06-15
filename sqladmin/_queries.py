@@ -88,11 +88,11 @@ class Query:
                 direction = get_direction(relation)
                 if direction in ["ONETOMANY", "MANYTOMANY"]:
                     related_stmt = self._get_to_many_stmt(relation, value)
-                    related_objs = session.execute(related_stmt).scalars().all()
+                    related_objs = session.execute(related_stmt).unique().scalars().all()
                     setattr(obj, key, related_objs)
                 elif direction == "ONETOONE":
                     related_stmt = self._get_to_one_stmt(relation, value)
-                    related_obj = session.execute(related_stmt).scalars().first()
+                    related_obj = session.execute(related_stmt).unique().scalars().first()
                     setattr(obj, key, related_obj)
                 else:
                     obj = self._set_many_to_one(obj, relation, value)
@@ -120,12 +120,12 @@ class Query:
                 if direction in ["ONETOMANY", "MANYTOMANY"]:
                     related_stmt = self._get_to_many_stmt(relation, value)
                     result = await session.execute(related_stmt)
-                    related_objs = result.scalars().all()
+                    related_objs = result.unique().scalars().all()
                     setattr(obj, key, related_objs)
                 elif direction == "ONETOONE":
                     related_stmt = self._get_to_one_stmt(relation, value)
                     result = await session.execute(related_stmt)
-                    related_obj = result.scalars().first()
+                    related_obj = result.unique().scalars().first()
                     setattr(obj, key, related_obj)
                 else:
                     obj = self._set_many_to_one(obj, relation, value)

@@ -28,6 +28,7 @@
         - is_visible
         - is_accessible
         - column_searchable_list
+        - search_auto_submit
         - search_placeholder
         - column_sortable_list
         - column_default_sort
@@ -54,6 +55,7 @@
         - count_query
         - search_query
         - sort_query
+        - details_query
         - on_model_change
         - after_model_change
         - on_model_delete

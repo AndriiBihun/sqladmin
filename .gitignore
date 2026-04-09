@@ -14,3 +14,6 @@ examples/
 .uploads
 test.db
 coverage.xml
+dist/
+site/
+.idea/

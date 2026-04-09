@@ -1,8 +1,6 @@
 from sqladmin.application import Admin, action, expose
 from sqladmin.models import BaseView, ModelView
 
-__version__ = "0.20.1"
-
 __all__ = [
     "Admin",
     "expose",

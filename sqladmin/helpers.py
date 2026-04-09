@@ -6,7 +6,7 @@ import os
 import re
 import unicodedata
 from abc import ABC, abstractmethod
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 from typing import (
     Any,
     AsyncGenerator,
@@ -123,7 +123,11 @@ def secure_filename(filename: str) -> str:
     if (
         os.name == "nt"
         and filename
-        and filename.split(".")[0].upper() in _windows_device_files
+        and filename.split(
+            ".",
+            maxsplit=1,
+        )[0].upper()
+        in _windows_device_files
     ):
         filename = f"_{filename}"  # pragma: no cover
 
@@ -152,8 +156,10 @@ class _PseudoBuffer:
     interface.
     """
 
-    def write(self, value: T) -> T:
-        return value
+    encoding = "utf-8"
+
+    def write(self, value: T) -> bytes:
+        return str(value).encode(self.encoding)
 
 
 def stream_to_csv(
@@ -224,13 +230,21 @@ def object_identifier_values(id_string: str, model: Any) -> tuple:
     pks = get_primary_keys(model)
     for pk, part in zip(pks, _object_identifier_parts(id_string, model)):
         type_ = get_column_python_type(pk)
-        value = False if type_ is bool and part == "False" else type_(part)
+        value: Any
+        if issubclass(type_, (date, datetime, time)):
+            value = type_.fromisoformat(part)
+        elif issubclass(type_, bool):
+            value = False if part == "False" else type_(part)
+        else:
+            value = type_(part)  # type: ignore [call-arg]
         values.append(value)
     return tuple(values)
 
 
 def get_direction(prop: MODEL_PROPERTY) -> str:
-    assert isinstance(prop, RelationshipProperty)
+    if not isinstance(prop, RelationshipProperty):
+        raise TypeError("Expected RelationshipProperty, got %s" % type(prop))
+
     name = prop.direction.name
     if name == "ONETOMANY" and not prop.uselist:
         return "ONETOONE"
@@ -277,10 +291,11 @@ def parse_interval(value: str) -> timedelta | None:
 def is_falsy_value(value: Any) -> bool:
     if value is None:
         return True
-    elif not value and isinstance(value, str):
+
+    if not value and isinstance(value, str):
         return True
-    else:
-        return False
+
+    return False
 
 
 def choice_type_coerce_factory(type_: Any) -> Callable[[Any], Any]:

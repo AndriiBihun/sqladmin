@@ -19,6 +19,7 @@ from typing import (
     Union,
     no_type_check,
 )
+from typing import cast as typing_cast
 from urllib.parse import urlencode
 
 import anyio
@@ -36,7 +37,12 @@ from wtforms import Field, Form
 from wtforms.fields.core import UnboundField
 
 from sqladmin._queries import Query
-from sqladmin._types import MODEL_ATTR
+from sqladmin._types import (
+    MODEL_ATTR,
+    ColumnFilter,
+    OperationColumnFilter,
+    SimpleColumnFilter,
+)
 from sqladmin.ajax import create_ajax_loader
 from sqladmin.exceptions import InvalidModelError
 from sqladmin.formatters import BASE_FORMATTERS
@@ -54,10 +60,11 @@ from sqladmin.helpers import (
 
 # stream_to_csv,
 from sqladmin.pagination import Pagination
+from sqladmin.pretty_export import PrettyExport
 from sqladmin.templating import Jinja2Templates
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy.ext.asyncio import async_sessionmaker  # type: ignore[attr-defined]
 
     from sqladmin.application import BaseAdmin
 
@@ -76,8 +83,8 @@ class ModelViewMeta(type):
     """
 
     @no_type_check
-    def __new__(mcls, name, bases, attrs: dict, **kwargs: Any):
-        cls: Type["ModelView"] = super().__new__(mcls, name, bases, attrs)
+    def __new__(mcs, name, bases, attrs: dict, **kwargs: Any):
+        cls: Type["ModelView"] = super().__new__(mcs, name, bases, attrs)
 
         model = kwargs.get("model")
 
@@ -86,10 +93,10 @@ class ModelViewMeta(type):
 
         try:
             inspect(model)
-        except NoInspectionAvailable:
+        except NoInspectionAvailable as exc:
             raise InvalidModelError(
                 f"Class {model.__name__} is not a SQLAlchemy model."
-            )
+            ) from exc
 
         cls.pk_columns = get_primary_keys(model)
         cls.identity = slugify_class_name(model.__name__)
@@ -98,21 +105,19 @@ class ModelViewMeta(type):
         cls.name = attrs.get("name", prettify_class_name(cls.model.__name__))
         cls.name_plural = attrs.get("name_plural", f"{cls.name}s")
 
-        mcls._check_conflicting_options(["column_list", "column_exclude_list"], attrs)
-        mcls._check_conflicting_options(
-            ["form_columns", "form_excluded_columns"], attrs
-        )
-        mcls._check_conflicting_options(
+        mcs._check_conflicting_options(["column_list", "column_exclude_list"], attrs)
+        mcs._check_conflicting_options(["form_columns", "form_excluded_columns"], attrs)
+        mcs._check_conflicting_options(
             ["column_details_list", "column_details_exclude_list"], attrs
         )
-        mcls._check_conflicting_options(
+        mcs._check_conflicting_options(
             ["column_export_list", "column_export_exclude_list"], attrs
         )
 
         return cls
 
     @classmethod
-    def _check_conflicting_options(mcls, keys: List[str], attrs: dict) -> None:
+    def _check_conflicting_options(mcs, keys: List[str], attrs: dict) -> None:
         if all(k in attrs for k in keys):
             raise AssertionError(f"Cannot use {' and '.join(keys)} together.")
 
@@ -205,7 +210,12 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
 
     # Internals
     pk_columns: ClassVar[Tuple[Column]]
-    session_maker: ClassVar[Union[sessionmaker, "async_sessionmaker"]]
+    session_maker: ClassVar[  # type: ignore[no-any-unimported]
+        Union[
+            sessionmaker,
+            "async_sessionmaker",
+        ]
+    ]
     is_async: ClassVar[bool] = False
     is_model: ClassVar[bool] = True
     ajax_lookup_url: ClassVar[str] = ""
@@ -315,6 +325,24 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         ```
     """
 
+    search_auto_submit: ClassVar[bool] = True
+    """Automatically submit search while typing in list view.
+
+    When set to `True`, typing in the search input triggers a delayed search.
+    Set to `False` to require pressing `Enter` or clicking the search button.
+    """
+
+    column_filters: ClassVar[Sequence[ColumnFilter]] = []
+    """Collection of the filterable columns for the list view.
+    Columns can either be string names or SQLAlchemy columns.
+
+    ???+ example
+        ```python
+        class UserAdmin(ModelView, model=User):
+            column_filters = [User.is_admin]
+        ```
+    """
+
     column_sortable_list: ClassVar[Sequence[MODEL_ATTR]] = []
     """Collection of the sortable columns for the list view.
 
@@ -401,7 +429,7 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
     """
 
     save_as: ClassVar[bool] = False
-    """Set `save_as` to enable a “save as new” feature on admin change forms.
+    """Set `save_as` to enable a "save as new" feature on admin change forms.
 
     Normally, objects have three save options:
     ``Save`, `Save and continue editing` and `Save and add another`.
@@ -435,6 +463,12 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
     edit_template: ClassVar[str] = "sqladmin/edit.html"
     """Edit view template. Default is `sqladmin/edit.html`."""
 
+    # Template configuration
+    show_compact_lists: ClassVar[bool] = True
+    """Show compact lists. Default is `True`. 
+    If False, when showing lists of objects, each object will be \
+    displayed in a separate line."""
+
     # Export
     column_export_list: ClassVar[List[MODEL_ATTR]] = []
     """List of columns to include when exporting.
@@ -466,6 +500,17 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
     export_max_rows: ClassVar[int] = 0
     """Maximum number of rows allowed for export.
     Unlimited by default.
+    """
+
+    use_pretty_export: ClassVar[bool] = False
+    """
+    Enable export of CSV files using column labels and column formatters.
+
+    If set to True, the export will apply column labels and formatting logic 
+    used in the list template.
+    Otherwise, raw database values and field names will be used.
+
+    You can override cell formatting per column by implementing `custom_export_cell`.
     """
 
     # Form
@@ -648,7 +693,7 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         - None will be displayed as an empty string
         - bool will be displayed as a checkmark if it is True otherwise as an X.
 
-    If you don’t like the default behavior and don’t want any type formatters applied,
+    If you don't like the default behavior and don't want any type formatters applied,
     just override this property with an empty dictionary:
 
     ???+ example
@@ -721,6 +766,19 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         self._custom_actions_in_detail: Dict[str, str] = {}
         self._custom_actions_confirmation: Dict[str, str] = {}
 
+    def _run_arbitrary_query_sync(self, stmt: ClauseElement) -> Any:
+        with self.session_maker(expire_on_commit=False) as session:
+            result = session.execute(stmt)
+            return result.all()
+
+    async def _run_arbitrary_query(self, stmt: ClauseElement) -> Any:
+        if self.is_async:
+            async with self.session_maker(expire_on_commit=False) as session:
+                result = await session.execute(stmt)
+                return result.all()
+        else:
+            return self._run_arbitrary_query_sync(stmt)
+
     def _run_query_sync(self, stmt: ClauseElement) -> Any:
         with self.session_maker(expire_on_commit=False) as session:
             result = session.execute(stmt)
@@ -767,8 +825,8 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
                 return self.column_default_sort
             if isinstance(self.column_default_sort, tuple):
                 return [self.column_default_sort]
-            else:
-                return [(self.column_default_sort, False)]
+
+            return [(self.column_default_sort, False)]
 
         return [(pk.name, False) for pk in self.pk_columns]
 
@@ -785,10 +843,10 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
 
         try:
             return int(number)
-        except ValueError:
+        except ValueError as exc:
             raise HTTPException(
                 status_code=400, detail="Invalid page or pageSize parameter"
-            )
+            ) from exc
 
     async def count(self, request: Request, stmt: Optional[Select] = None) -> int:
         if stmt is None:
@@ -806,13 +864,36 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         for relation in self._list_relations:
             stmt = stmt.options(selectinload(relation))
 
+        for filter_ in self.get_filters():
+            filter_param_name = filter_.parameter_name
+            filter_value = request.query_params.get(filter_param_name)
+
+            if filter_value:
+                if hasattr(filter_, "has_operator") and filter_.has_operator:
+                    # Use operation-based filtering
+                    operation_filter = typing_cast(OperationColumnFilter, filter_)
+                    operation_param = request.query_params.get(
+                        f"{filter_param_name}_op"
+                    )
+                    if operation_param:
+                        stmt = await operation_filter.get_filtered_query(
+                            stmt, operation_param, filter_value, self.model
+                        )
+                else:
+                    # Use simple filtering for filters without operators
+                    simple_filter = typing_cast(SimpleColumnFilter, filter_)
+                    stmt = await simple_filter.get_filtered_query(
+                        stmt, filter_value, self.model
+                    )
+
         stmt = self.sort_query(stmt, request)
 
         if search:
             stmt = self.search_query(stmt=stmt, term=search)
-            count = await self.count(request, select(func.count()).select_from(stmt))
-        else:
-            count = await self.count(request)
+
+        count = await self.count(
+            request, select(func.count()).select_from(stmt.subquery())
+        )
 
         stmt = stmt.limit(page_size).offset((page - 1) * page_size)
         rows = await self._run_query(stmt)
@@ -843,12 +924,8 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         rows = await self._run_query(stmt)
         return rows[0] if rows else None
 
-    async def get_object_for_details(self, value: Any) -> Any:
-        stmt = self._stmt_by_identifier(value)
-
-        for relation in self._details_relations:
-            stmt = stmt.options(selectinload(relation))
-
+    async def get_object_for_details(self, request: Request) -> Any:
+        stmt = self.details_query(request)
         return await self._get_object_by_pk(stmt)
 
     async def get_object_for_edit(self, request: Request) -> Any:
@@ -918,14 +995,16 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         """This function generalizes constructing a list of columns
         for any sequence of inclusions or exclusions.
         """
-
         if include == "__all__":
             return self._prop_names
-        elif include:
+
+        if include:
             return [self._get_prop_name(item) for item in include]
-        elif exclude:
+
+        if exclude:
             exclude = [self._get_prop_name(item) for item in exclude]
             return [prop for prop in self._prop_names if prop not in exclude]
+
         return defaults
 
     def get_list_columns(self) -> List[str]:
@@ -976,6 +1055,15 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
             defaults=self._list_prop_names,
         )
 
+    def get_filters(self) -> List[ColumnFilter]:
+        """Get list of filters."""
+
+        filters = getattr(self, "column_filters", None)
+        if not filters:
+            return []
+
+        return filters
+
     async def on_model_change(
         self, data: dict, model: Any, is_created: bool, request: Request
     ) -> None:
@@ -1025,7 +1113,7 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
 
         form = await get_model_form(
             model=self.model,
-            session_maker=self.session_maker,
+            session_maker=self.session_maker,  # type: ignore[arg-type]
             only=self._form_prop_names,
             column_labels=self._column_labels,
             form_args=self.form_args,
@@ -1091,6 +1179,14 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
 
         return select(self.model)
 
+    def details_query(self, request: Request) -> Select:
+        """
+        The SQLAlchemy select expression used for the details page which can be
+        customized. By default it will select all objects without any filters.
+        """
+
+        return self.form_edit_query(request)
+
     def edit_form_query(self, request: Request) -> Select:
         msg = (
             "Overriding 'edit_form_query' is deprecated. Use 'form_edit_query' instead."
@@ -1117,7 +1213,7 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         By default it will select all objects without any filters.
         """
 
-        return select(func.count(self.pk_columns[0]))
+        return select(func.count(self.pk_columns[0])).select_from(self.model)
 
     def sort_query(self, stmt: Select, request: Request) -> Select:
         """
@@ -1161,9 +1257,16 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
         export_type: str = "csv",
     ) -> StreamingResponse:
         if export_type == "csv":
-            return await self._export_csv(data)
-        elif export_type == "json":
+            export_method = (
+                PrettyExport.pretty_export_csv(self, data)
+                if self.use_pretty_export
+                else self._export_csv(data)
+            )
+            return await export_method
+
+        if export_type == "json":
             return await self._export_json(data)
+
         raise NotImplementedError("Only export_type='csv' or 'json' is implemented.")
 
     async def _export_csv(
@@ -1187,7 +1290,7 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
 
         return StreamingResponse(
             content=stream_to_csv(generate),
-            media_type="text/csv",
+            media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f"attachment;filename={filename}"},
         )
 
@@ -1206,7 +1309,9 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
                     name: str(await self.get_prop_value(row, name))
                     for name in self._export_prop_names
                 }
-                yield json.dumps(row_dict) + (separator if idx < last_idx else "")
+                yield json.dumps(row_dict, ensure_ascii=False) + (
+                    separator if idx < last_idx else ""
+                )
 
             yield "]"
 
@@ -1216,6 +1321,22 @@ class ModelView(BaseView, metaclass=ModelViewMeta):
             media_type="application/json",
             headers={"Content-Disposition": f"attachment;filename={filename}"},
         )
+
+    async def custom_export_cell(
+        self,
+        row: Any,
+        name: str,
+        value: Any,
+    ) -> Optional[str]:
+        """
+        Override to provide custom formatting for a specific cell in pretty export.
+
+        Return a string to override the default formatting for the given field,
+        or return None to fall back to `base_export_cell`.
+
+        Only used when `use_pretty_export = True`.
+        """
+        return None
 
     def _refresh_form_rules_cache(self) -> None:
         if self.form_rules:

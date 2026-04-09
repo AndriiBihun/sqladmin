@@ -1,7 +1,7 @@
 from typing import Any, AsyncGenerator
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import Column, ForeignKey, Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import declarative_base, relationship, selectinload, sessionmaker
@@ -120,14 +120,14 @@ async def prepare_database() -> AsyncGenerator[None, None]:
     yield
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
-
     await engine.dispose()
 
 
 @pytest.fixture
 async def client(prepare_database: Any) -> AsyncGenerator[AsyncClient, None]:
-    async with AsyncClient(app=app, base_url="http://testserver") as c:
-        yield c
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        yield client
 
 
 async def test_ajax_lookup_invalid_query_params(client: AsyncClient) -> None:
@@ -141,7 +141,7 @@ async def test_ajax_lookup_invalid_query_params(client: AsyncClient) -> None:
     assert response.status_code == 400
 
 
-async def test_ajax_response(client: AsyncClient) -> None:
+async def test_ajax_response_test(client: AsyncClient) -> None:
     user = User(name="John Snow")
     async with session_maker() as s:
         s.add(user)
@@ -207,7 +207,7 @@ async def test_ajax_response_limit(client: AsyncClient) -> None:
     # (up to default cap of 10)
     assert response.json() == {
         "results": [
-            {"id": f"{i+1}", "text": f"User {i+1}"} for i in range(users_to_create)
+            {"id": f"{i + 1}", "text": f"User {i + 1}"} for i in range(users_to_create)
         ]
     }
 
@@ -216,7 +216,7 @@ async def test_ajax_response_limit(client: AsyncClient) -> None:
     assert response.status_code == 200
     # Room admin has a limit 3 of
     assert response.json() == {
-        "results": [{"id": f"{i+1}", "text": f"User {i+1}"} for i in range(3)]
+        "results": [{"id": f"{i + 1}", "text": f"User {i + 1}"} for i in range(3)]
     }
 
 

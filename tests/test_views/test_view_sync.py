@@ -5,6 +5,7 @@ from typing import Any, Generator
 import pytest
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
     Date,
     Enum,
@@ -110,6 +111,15 @@ class Movie(Base):
     id = Column(Integer, primary_key=True)
 
 
+class Product(Base):
+    __tablename__ = "product"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    price = Column(Integer)
+    is_sold = Column(Boolean, nullable=False)
+
+
 @pytest.fixture
 def prepare_database() -> Generator[None, None, None]:
     Base.metadata.create_all(engine)
@@ -157,6 +167,8 @@ class UserAdmin(ModelView, model=User):
 
 class AddressAdmin(ModelView, model=Address):
     column_list = ["id", "user_id", "user", "user.profile.id"]
+    column_searchable_list = [Address.id]
+    search_auto_submit = False
     name_plural = "Addresses"
     export_max_rows = 3
 
@@ -177,10 +189,15 @@ class MovieAdmin(ModelView, model=Movie):
         return False
 
 
+class ProductAdmin(ModelView, model=Product):
+    pass
+
+
 admin.add_view(UserAdmin)
 admin.add_view(AddressAdmin)
 admin.add_view(ProfileAdmin)
 admin.add_view(MovieAdmin)
+admin.add_view(ProductAdmin)
 
 
 def test_root_view(client: TestClient) -> None:
@@ -348,6 +365,7 @@ def test_detail_page(client: TestClient) -> None:
     assert response.status_code == 200
     assert '<th class="w-1">Column</th>' in response.text
     assert '<th class="w-1">Value</th>' in response.text
+    assert '<h3 class="card-title">\n        Id: 1' in response.text
     assert "<td>id</td>" in response.text
     assert "<td>1</td>" in response.text
     assert "<td>name</td>" in response.text
@@ -446,6 +464,68 @@ def test_create_endpoint_get_form(client: TestClient) -> None:
         in response.text
     )
     assert '<select class="form-control" id="status" name="status">' in response.text
+
+
+def test_create_endpoint_with_required_fields(client: TestClient) -> None:
+    response = client.get("/admin/product/create")
+
+    assert response.status_code == 200
+    assert (
+        '<label class="form-label col-sm-2 col-form-label required-label" for="name" '
+        'title="This is a required field">Name</label>' in response.text
+    )
+    assert (
+        '<label class="form-label col-sm-2 col-form-label" for="price">Price</label>'
+        in response.text
+    )
+
+
+def test_update_endpoint_with_checkbox_widget(client: TestClient) -> None:
+    with session_maker() as session:
+        session.add_all(
+            [
+                Product(
+                    id=1,
+                    name="RAM",
+                    price=99_999,
+                    is_sold=False,
+                ),
+                Product(
+                    id=2,
+                    name="RAM second",
+                    price=12421,
+                    is_sold=True,
+                ),
+            ]
+        )
+        session.commit()
+
+    stmt = select(func.count(Product.id))
+    with session_maker() as s:
+        result = s.execute(stmt)
+    assert result.scalar_one() == 2
+
+    response = client.get("/admin/product/edit/1")
+
+    assert response.status_code == 200
+
+    assert (
+        '<div class="form-switch d-flex align-items-center h-100">'
+        f'<input class="form-check-input" id="{Product.is_sold.key}" '
+        f'name="{Product.is_sold.key}" type="checkbox" value="y"></div>'
+        in response.text
+    )
+
+    response = client.get("/admin/product/edit/2")
+
+    assert response.status_code == 200
+
+    assert (
+        '<div class="form-switch d-flex align-items-center h-100">'
+        f'<input checked class="form-check-input" id="{Product.is_sold.key}" '
+        f'name="{Product.is_sold.key}" type="checkbox" value="y"></div>'
+        in response.text
+    )
 
 
 def test_create_endpoint_post_form(client: TestClient) -> None:
@@ -698,7 +778,11 @@ def test_searchable_list(client: TestClient) -> None:
 
     response = client.get("/admin/user/list")
     assert "Search: name" in response.text
+    assert 'data-search-auto-submit="true"' in response.text
     assert "/admin/user/details/1" in response.text
+
+    response = client.get("/admin/address/list")
+    assert 'data-search-auto-submit="false"' in response.text
 
     response = client.get("/admin/user/list?search=ro")
     assert "/admin/user/details/1" in response.text
@@ -732,6 +816,25 @@ def test_export_csv(client: TestClient) -> None:
     assert response.text == "name,status\r\nDaniel,ACTIVE\r\n"
 
 
+def test_export_csv_utf8(client: TestClient) -> None:
+    with session_maker() as session:
+        user_1 = User(name="Daniel", status="ACTIVE")
+        user_2 = User(name="دانيال", status="ACTIVE")
+        user_3 = User(name="積極的", status="ACTIVE")
+        user_4 = User(name="Даниэль", status="ACTIVE")
+        session.add(user_1)
+        session.add(user_2)
+        session.add(user_3)
+        session.add(user_4)
+        session.commit()
+
+    response = client.get("/admin/user/export/csv")
+    assert response.text == (
+        "name,status\r\nDaniel,ACTIVE\r\nدانيال,ACTIVE\r\n"
+        "積極的,ACTIVE\r\nДаниэль,ACTIVE\r\n"
+    )
+
+
 def test_export_json(client: TestClient) -> None:
     with session_maker() as session:
         user = User(name="Daniel", status="ACTIVE")
@@ -740,6 +843,27 @@ def test_export_json(client: TestClient) -> None:
 
     response = client.get("/admin/user/export/json")
     assert response.text == '[{"name": "Daniel", "status": "ACTIVE"}]'
+
+
+def test_export_json_utf8(client: TestClient) -> None:
+    with session_maker() as session:
+        user_1 = User(name="Daniel", status="ACTIVE")
+        user_2 = User(name="دانيال", status="ACTIVE")
+        user_3 = User(name="積極的", status="ACTIVE")
+        user_4 = User(name="Даниэль", status="ACTIVE")
+        session.add(user_1)
+        session.add(user_2)
+        session.add(user_3)
+        session.add(user_4)
+        session.commit()
+
+    response = client.get("/admin/user/export/json")
+    assert response.text == (
+        '[{"name": "Daniel", "status": "ACTIVE"},'
+        '{"name": "دانيال", "status": "ACTIVE"},'
+        '{"name": "積極的", "status": "ACTIVE"},'
+        '{"name": "Даниэль", "status": "ACTIVE"}]'
+    )
 
 
 def test_export_json_complex_model(client: TestClient) -> None:

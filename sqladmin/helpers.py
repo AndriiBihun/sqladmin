@@ -183,7 +183,7 @@ def stream_to_csv(
 
 
 def get_primary_keys(model: Any) -> tuple[Column, ...]:
-    return tuple(sa_inspect(model).mapper.primary_key)
+    return tuple(sa_inspect(model).mapper.local_table.primary_key.c)
 
 
 def get_object_identifier(obj: Any) -> Any:
